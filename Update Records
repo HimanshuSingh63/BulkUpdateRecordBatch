@@ -1,0 +1,75 @@
+public class UpdateBulkAccountsEmailBatch implements Database.Batchable<sObject>, Database.Stateful {
+    
+    private Integer emailCounter;
+    private static final String EMAIL_COUNTER_SETTING = 'Email_Counter';
+    private Integer recordsProcessed = 0;
+    private final Integer BATCH_SIZE = 10000;
+
+    public UpdateBulkAccountsEmailBatch() {
+        this.emailCounter = getLastEmailCounter();
+    }
+
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([
+            SELECT Id, Name, CustomEmail__c 
+            FROM Account 
+            WHERE Name LIKE 'Bulk Account%'
+            ORDER BY Id
+        ]);
+    }
+    
+    public void execute(Database.BatchableContext bc, List<Account> scope) {
+        List<Account> accountsToUpdate = new List<Account>();
+        
+        for (Account acc : scope) {
+            acc.CustomEmail__c = 'tesths' + emailCounter + '@gmail.com';
+            accountsToUpdate.add(acc);
+            emailCounter++;
+            recordsProcessed++;
+        }
+        
+        if (!accountsToUpdate.isEmpty()) {
+            Database.SaveResult[] results = Database.update(accountsToUpdate, false);
+            // Process errors if any
+            for (Database.SaveResult result : results) {
+                if (!result.isSuccess()) {
+                    System.debug('Error updating Account: ' + result.getErrors());
+                }
+            }
+        }
+    }
+    
+    public void finish(Database.BatchableContext bc) {
+        saveLastEmailCounter(emailCounter);
+        System.debug('Batch job completed. Records processed: ' + recordsProcessed + '. Last email counter: ' + (emailCounter - 1));
+        
+        // Check if there are more records to process
+        Integer remainingRecords = [SELECT COUNT() FROM Account WHERE Name LIKE 'Bulk Account%' AND CustomEmail__c = null];
+        if (remainingRecords > 0) {
+            // Chain the next batch job
+            UpdateBulkAccountsEmailBatch nextBatch = new UpdateBulkAccountsEmailBatch();
+            Database.executeBatch(nextBatch, BATCH_SIZE);
+        }
+    }
+    
+    private Integer getLastEmailCounter() {
+        Email_Counter__c counterSetting = Email_Counter__c.getOrgDefaults();
+        
+        if (counterSetting.Counter__c != null) {
+            return Integer.valueOf(counterSetting.Counter__c);
+        } else {
+            Email_Counter__c newSetting = new Email_Counter__c(
+                SetupOwnerId = UserInfo.getOrganizationId(),
+                Counter__c = 50020
+            );
+            upsert newSetting;
+            return 50020;
+        }
+    }
+    
+    private void saveLastEmailCounter(Integer counter) {
+        Email_Counter__c setting = Email_Counter__c.getOrgDefaults();
+        setting.Counter__c = counter;
+        upsert setting;
+    }
+}
