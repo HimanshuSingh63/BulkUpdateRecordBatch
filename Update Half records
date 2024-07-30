@@ -1,0 +1,49 @@
+public class UpdateBulkAccountsCheckboxBatch implements Database.Batchable<sObject>, Database.Stateful {
+    private Integer recordsProcessed = 0;
+    private final Integer RECORD_LIMIT = 250000;
+    private final Integer BATCH_SIZE = 2000;
+    
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([
+            SELECT Id, Name, Custom_Checkbox__c 
+            FROM Account 
+            WHERE Name LIKE 'Bulk Account%'
+            AND Custom_Checkbox__c = false
+            ORDER BY Id
+            LIMIT :RECORD_LIMIT
+        ]);
+    }
+    
+    public void execute(Database.BatchableContext bc, List<Account> scope) {
+        List<Account> accountsToUpdate = new List<Account>();
+        
+        for (Account acc : scope) {
+            if (recordsProcessed >= RECORD_LIMIT) {
+                break; // Stop processing when we reach 250,000
+            }
+            acc.Custom_Checkbox__c = true;
+            accountsToUpdate.add(acc);
+            recordsProcessed++;
+        }
+        
+        if (!accountsToUpdate.isEmpty()) {
+            Database.SaveResult[] results = Database.update(accountsToUpdate, false);
+            // Process errors if any
+            for (Database.SaveResult result : results) {
+                if (!result.isSuccess()) {
+                    System.debug('Error updating Account: ' + result.getErrors());
+                    recordsProcessed--; // Decrease count for failed updates
+                }
+            }
+        }
+    }
+    
+    public void finish(Database.BatchableContext bc) {
+        System.debug('Batch job completed. Records processed: ' + recordsProcessed);
+        // Remove the batch chaining logic
+    }
+}
+
+// call this batch:
+UpdateBulkAccountsCheckboxBatch batchJob = new UpdateBulkAccountsCheckboxBatch();
+Database.executeBatch(batchJob, 2000);
