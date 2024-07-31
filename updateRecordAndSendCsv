@@ -1,1 +1,66 @@
-
+public class BatchWithCSVResults implements Database.Batchable<sObject>, Database.Stateful {
+    
+    private List<String> successRecords = new List<String>();
+    private List<String> failedRecords = new List<String>();
+    private Integer totalProcessed = 0;
+    
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([
+            SELECT Id, Name 
+            FROM Account 
+            ORDER BY Id LIMIT 250000
+        ]);
+    }
+    
+    public void execute(Database.BatchableContext bc, List<Account> scope) {
+        List<Account> accountsToUpdate = new List<Account>();
+        
+        for(Account acc : scope) {
+            try {
+                acc.Description = 'Updated by batch';
+                accountsToUpdate.add(acc);
+                successRecords.add(acc.Id + ',' + acc.Name);
+            } catch(Exception e) {
+                failedRecords.add(acc.Id + ',' + acc.Name + ',' + e.getMessage());
+            }
+        }
+        
+        List<Database.SaveResult> saveResults = Database.update(accountsToUpdate, false);
+        
+        for(Integer i = 0; i < saveResults.size(); i++) {
+            if(!saveResults[i].isSuccess()) {
+                failedRecords.add(accountsToUpdate[i].Id + ',' + accountsToUpdate[i].Name + ',' + saveResults[i].getErrors()[0].getMessage());
+                successRecords.remove(successRecords.size() - 1);
+            }
+        }
+        
+        totalProcessed += scope.size();
+    }
+    
+    public void finish(Database.BatchableContext bc) {
+        
+        String successCSV = 'Id,Name\n' + String.join(successRecords, '\n');
+        String failedCSV = 'Id,Name,Error\n' + String.join(failedRecords, '\n');
+        
+       
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+        email.setToAddresses(new String[]{'himanshu.s@hicglobalsolutions.com'});
+        email.setSubject('Batch Job Results');
+        email.setPlainTextBody('Batch job completed. Total records processed: ' + totalProcessed + 
+                               '\nSuccessful updates: ' + successRecords.size() + 
+                               '\nFailed updates: ' + failedRecords.size());
+        
+        Messaging.EmailFileAttachment successAttachment = new Messaging.EmailFileAttachment();
+        successAttachment.setFileName('success_records.csv');
+        successAttachment.setBody(Blob.valueOf(successCSV));
+        
+        Messaging.EmailFileAttachment failedAttachment = new Messaging.EmailFileAttachment();
+        failedAttachment.setFileName('failed_records.csv');
+        failedAttachment.setBody(Blob.valueOf(failedCSV));
+        
+        email.setFileAttachments(new Messaging.EmailFileAttachment[]{successAttachment, failedAttachment});
+        
+      
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[]{email});
+    }
+}
