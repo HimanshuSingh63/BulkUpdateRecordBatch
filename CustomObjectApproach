@@ -1,0 +1,162 @@
+public class BatchWithCSVResults implements Database.Batchable<sObject>, Database.Stateful {
+    
+    private static final String BATCH_NAME = 'BatchWithCSVResults';
+    private Integer batchNumber = 0;
+    
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        
+        //delete [SELECT Id FROM BatchResult__c WHERE Name LIKE :BATCH_NAME + '_%'];
+        
+        return Database.getQueryLocator([
+            SELECT Id, Name 
+            FROM Account 
+            ORDER BY Id
+        ]);
+    }
+    
+    public void execute(Database.BatchableContext bc, List<Account> scope) {
+        batchNumber++;
+        List<Account> accountsToUpdate = new List<Account>();
+        List<String> successIds = new List<String>();
+        List<String> failedIds = new List<String>();
+        List<String> errorMessages = new List<String>();
+        
+        for(Account acc : scope) {
+            try {
+                acc.Description = 'Updated by batch 31-July';
+                accountsToUpdate.add(acc);
+                successIds.add(acc.Id);
+            } catch(Exception e) {
+                failedIds.add(acc.Id);
+                errorMessages.add(e.getMessage());
+            }
+        }
+        
+        List<Database.SaveResult> saveResults = Database.update(accountsToUpdate, false);
+        
+        for(Integer i = 0; i < saveResults.size(); i++) {
+            if(!saveResults[i].isSuccess()) {
+                successIds.remove(successIds.size() - 1);
+                failedIds.add(accountsToUpdate[i].Id);
+                errorMessages.add(saveResults[i].getErrors()[0].getMessage());
+            }
+        }
+        
+        String fullErrorMessage = String.join(errorMessages, ',');
+        String errorMessages1 = '';
+        String errorMessages2 = '';
+        
+        if (fullErrorMessage.length() > 131072) {
+            errorMessages1 = fullErrorMessage.substring(0, 131072);
+            errorMessages2 = fullErrorMessage.substring(131072);
+        } else {
+            errorMessages1 = fullErrorMessage;
+        }
+        
+        // Create a new BatchResult__c record for this batch execution
+        BatchResult__c batchResult = new BatchResult__c(
+            Name = BATCH_NAME + '_' + batchNumber,
+            SuccessfulRecords__c = String.join(successIds, ','),
+            FailedRecords__c = String.join(failedIds, ','),
+            ErrorMessages__c = errorMessages1,
+            ErrorMessages1__c = errorMessages2,
+            TotalProcessed__c = scope.size(),
+            FailedRecordsCount__c = failedIds.size(),
+            SeccussRecordCount__c = successIds.size(),
+            IsSuccess__c = failedIds.isEmpty()
+        );
+        try{
+            insert batchResult;
+        }
+        catch(Exception e){
+            System.debug(e);
+        }
+        
+    }
+    
+    public void finish(Database.BatchableContext bc) {
+        List<BatchResult__c> batchResults = [SELECT Id, Name, SuccessfulRecords__c, FailedRecords__c, ErrorMessages__c, ErrorMessages1__c, TotalProcessed__c, IsSuccess__c 
+                                             FROM BatchResult__c 
+                                             WHERE Name LIKE :BATCH_NAME + '_%' 
+                                             ORDER BY Name];
+        
+        Integer totalProcessed = 0;
+        Integer totalSuccessful = 0;
+        Integer totalFailed = 0;
+        Boolean overallSuccess = true;
+        String successCSV = 'Id\n';
+        String failedCSV = 'Id,Error\n';
+        
+        for(BatchResult__c result : batchResults) {
+            if (result.TotalProcessed__c != null) {
+                totalProcessed += Integer.valueOf(result.TotalProcessed__c);
+            }
+            
+            if (String.isNotBlank(result.SuccessfulRecords__c)) {
+                totalSuccessful += result.SuccessfulRecords__c.split(',').size();
+                successCSV += result.SuccessfulRecords__c.replace(',', '\n') + '\n';
+            }
+            
+            if (String.isNotBlank(result.FailedRecords__c)) {
+                totalFailed += result.FailedRecords__c.split(',').size();
+                failedCSV += createFailedCSV(result.FailedRecords__c, 
+                                             result.ErrorMessages__c != null ? result.ErrorMessages__c : '',
+                                             result.ErrorMessages1__c != null ? result.ErrorMessages1__c : '');
+            }
+            
+            overallSuccess = overallSuccess && (result.IsSuccess__c == true);
+        }
+        
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+        email.setToAddresses(new String[]{'himanshu.s@hicglobalsolutions.com'});
+        email.setSubject('Batch Job Results - ' + BATCH_NAME);
+        email.setPlainTextBody('Batch job completed. Batch Name: ' + BATCH_NAME + 
+                               '\nTotal records processed: ' + totalProcessed + 
+                               '\nSuccessful updates: ' + totalSuccessful + 
+                               '\nFailed updates: ' + totalFailed +
+                               '\nOverall Success: ' + overallSuccess);
+        
+        Messaging.EmailFileAttachment successAttachment = new Messaging.EmailFileAttachment();
+        successAttachment.setFileName('success_records_' + BATCH_NAME + '.csv');
+        successAttachment.setBody(Blob.valueOf(successCSV));
+        
+        Messaging.EmailFileAttachment failedAttachment = new Messaging.EmailFileAttachment();
+        failedAttachment.setFileName('failed_records_' + BATCH_NAME + '.csv');
+        failedAttachment.setBody(Blob.valueOf(failedCSV));
+        
+        email.setFileAttachments(new Messaging.EmailFileAttachment[]{successAttachment, failedAttachment});
+        
+        try {
+            Messaging.sendEmail(new Messaging.SingleEmailMessage[]{email});
+        } catch (Exception e) {
+            System.debug('Error sending email: ' + e.getMessage());
+        }
+    }
+    
+    
+    private String createFailedCSV(String failedIds, String errorMessages, String errorMessages1) {
+        if (String.isBlank(failedIds)) {
+            return '';
+        }
+        
+        List<String> ids = failedIds.split(',');
+        List<String> errors = new List<String>();
+        
+        // Combine errorMessages and errorMessages1
+        String fullErrorMessage = (errorMessages != null ? errorMessages : '') + (errorMessages1 != null ? errorMessages1 : '');
+        
+        if (String.isNotBlank(fullErrorMessage)) {
+            errors = fullErrorMessage.split(',');
+        }
+        
+        List<String> rows = new List<String>();
+        for (Integer i = 0; i < ids.size(); i++) {
+            String errorMessage = (i < errors.size()) ? errors[i] : 'No specific error message';
+            // Escape commas in the error message to prevent CSV formatting issues
+            errorMessage = errorMessage.replace(',', '\\,');
+            rows.add(ids[i] + ',' + errorMessage);
+        }
+        
+        return !rows.isEmpty() ? String.join(rows, '\n') + '\n' : '';
+    }
+}
